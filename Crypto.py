@@ -1,65 +1,22 @@
 import streamlit as st
 import requests
+import openai
 import time
-import tweepy  # Twitter API client
 
 # --- Config ---
-OPENAI_API_KEY = "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"
-
-# Twitter API 
-TWITTER_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAEOJ3AEAAAAAl5M2Rb%2FB%2FS5E6qBn7SGNsi%2FwEVo%3DQK9FMAXTeB7rTJJf7gfdUyWI2aaljOOGOSensl0l37lTIJR0LL"
-
-# --- Setup Twitter Client ---
-client = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+OPENAI_API_KEY = "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"
+openai.api_key = OPENAI_API_KEY
 
 # --- Page Setup ---
 st.set_page_config(page_title="Crypto AI Deal Finder", layout="wide", initial_sidebar_state="expanded")
 
-# --- Custom CSS for styling ---
+# --- Custom CSS ---
 st.markdown("""
 <style>
     body, .block-container {
         background-color: #121212;
         color: #e0e0e0;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    .ticker-container {
-        width: 100%;
-        overflow: hidden;
-        background-color: white !important;
-        color: black !important;
-        font-weight: 700;
-        white-space: nowrap;
-        box-sizing: border-box;
-        border-radius: 0 !important;
-        padding: 10px 0;
-        user-select: none;
-        margin-bottom: 15px;
-    }
-    .ticker-move {
-        display: inline-block;
-        padding-left: 100%;
-        animation: ticker-scroll 20s linear infinite;
-    }
-    @keyframes ticker-scroll {
-        0% { transform: translateX(0); }
-        100% { transform: translateX(-100%); }
-    }
-    .stButton > button,
-    .stSelectbox > div,
-    .stTextInput > div,
-    .stSlider > div,
-    .stSidebar,
-    .stSidebar .sidebar-content,
-    .block-container,
-    .stMarkdown {
-        border-radius: 0 !important;
-    }
-    .risk-slider-label {
-        display: flex;
-        justify-content: space-between;
-        font-size: 0.85rem;
-        color: #bbb;
     }
     .section-header {
         color: #ff6f61;
@@ -70,136 +27,153 @@ st.markdown("""
         font-size: 1.4rem;
         user-select: none;
     }
-    .token-analysis {
-        background-color: #1e1e1e;
-        padding: 1rem;
-        margin-bottom: 1.5rem;
-        border: 1px solid #333;
+    .simple-terms {
+        font-style: italic;
+        color: #ccc;
+        margin-top: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Top Gainers Ticker ---
-def get_top_gainers():
+# --- Helper: fetch altcoins by chain from CoinGecko ---
+def fetch_altcoins(chain_id, per_page=100):
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
         "vs_currency": "usd",
-        "order": "price_change_percentage_24h_desc",
-        "per_page": 10,
+        "category": chain_id,
+        "order": "market_cap_desc",
+        "per_page": per_page,
         "page": 1,
         "sparkline": "false"
     }
     try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
         return []
 
-top_gainers = get_top_gainers()
-if top_gainers:
-    ticker_items = "  |  ".join(
-        f"{coin['name']} ({coin['symbol'].upper()}): +{coin['price_change_percentage_24h']:.2f}%"
-        for coin in top_gainers
+# Mapping for chain to CoinGecko category ID or fallback to chain slug:
+CHAIN_CATEGORY = {
+    "Ethereum": "ethereum-ecosystem",
+    "XRP": None,       # No exact category, fallback to filtering by platform below
+    "Cosmos": None,    # Same as XRP
+}
+
+# Helper to filter coins by platform for chains without category
+CHAIN_PLATFORM_SLUGS = {
+    "XRP": "ripple",
+    "Cosmos": "cosmos",
+}
+
+# --- Helper: get good altcoin picks with OpenAI ---
+def get_ai_picks(chain, altcoins):
+    """
+    Send coin list names to OpenAI with a prompt asking to pick top 5 altcoins
+    with potential on that chain with detailed description + simpler terms.
+    """
+    coin_names = [coin["name"] for coin in altcoins]
+    coin_list_str = ", ".join(coin_names[:50])  # limit to 50 to reduce prompt length
+    
+    prompt = (
+        f"You are a crypto analyst. From the following list of coins on the {chain} blockchain:\n"
+        f"{coin_list_str}\n"
+        "Pick the top 5 lesser-known altcoins with massive potential. "
+        "For each pick, provide:\n"
+        "1. Coin name\n"
+        "2. A detailed 3-paragraph explanation about the project, technology, and potential\n"
+        "3. A 'Simpler terms' section with a short easy explanation.\n\n"
+        "Format the response as:\n"
+        "Coin Name:\nDetailed Explanation...\nSimpler terms: ...\n\nRepeat for all 5 picks."
     )
-else:
-    ticker_items = "No data available"
-
-ticker_html = f"""
-<div class="ticker-container">
-  <div class="ticker-move">{ticker_items}</div>
-</div>
-"""
-st.markdown(ticker_html, unsafe_allow_html=True)
-
-# --- Sidebar Navigation ---
-page = st.sidebar.radio("Select Page", ["AI Crypto Analysis", "Sol Casino"])
-
-# --- Twitter Trending Fetcher ---
-def get_twitter_trends(chain):
-    # You can map chains to Twitter hashtags or topics:
-    hashtags = {
-        "Ethereum": ["#Ethereum", "#ETH", "#DeFi"],
-        "XRP": ["#XRP", "#Ripple"],
-        "Cosmos": ["#Cosmos", "#ATOM"]
-    }
     try:
-        trends_texts = []
-        for tag in hashtags.get(chain, []):
-            tweets = client.search_recent_tweets(query=tag, max_results=5)
-            if tweets and tweets.data:
-                for tweet in tweets.data:
-                    trends_texts.append(f"{tag}: {tweet.text}")
-        if not trends_texts:
-            return ["No trending tweets found."]
-        return trends_texts
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1200,
+            temperature=0.75,
+        )
+        text = response.choices[0].message.content.strip()
+        return text
     except Exception as e:
-        return [f"Error fetching Twitter trends: {e}"]
+        return None
 
-# --- AI Crypto Analysis Page ---
-if page == "AI Crypto Analysis":
-    st.title("🧠📈 Crypto AI Deal Finder")
-    st.markdown("""
-    Search Ethereum, XRP, and Cosmos chain coins by keyword.
-    AI suggestions are provided based on community, analytics, and project fundamentals.
-    """)
+# --- Fallback: top 5 altcoins by volume ---
+def fallback_picks(altcoins):
+    # Sort by volume desc, exclude top 3 by market cap (assuming those are big coins)
+    filtered = sorted(altcoins, key=lambda x: x["total_volume"], reverse=True)
+    filtered = [c for c in filtered if c["market_cap_rank"] and c["market_cap_rank"] > 3]
+    picks = filtered[:5]
+    return picks
 
-    selected_chain = st.selectbox("Choose blockchain", ["Ethereum", "XRP", "Cosmos"])
+# --- Main UI ---
+st.title("🧠📈 Crypto AI Deal Finder")
+st.markdown("Search altcoins by blockchain. AI suggests 5 promising altcoins with detailed and simplified explanations.")
 
-    # Updated suggestions (5 per chain)
-    suggestions = {
-        "Ethereum": [
-            {"name": "Arbitrum", "desc": "Layer 2 scaling solution with high adoption."},
-            {"name": "Lens Protocol", "desc": "Decentralized social graph infrastructure."},
-            {"name": "Chainlink", "desc": "Oracle service enabling smart contracts to interact with real-world data."},
-            {"name": "Uniswap", "desc": "Leading decentralized exchange on Ethereum."},
-            {"name": "Aave", "desc": "Decentralized lending protocol with a large user base."},
-        ],
-        "XRP": [
-            {"name": "Sologenic", "desc": "Bridges real-world assets onto XRP Ledger."},
-            {"name": "Equilibrium", "desc": "Synthetic assets and DeFi tools on XRP."},
-            {"name": "CasinoCoin", "desc": "A gaming token built on XRP Ledger."},
-            {"name": "Flare Network", "desc": "Smart contract platform integrated with XRP Ledger."},
-            {"name": "XRPL Labs", "desc": "Developers of popular XRP apps and tools."},
-        ],
-        "Cosmos": [
-            {"name": "Osmosis", "desc": "AMM for Cosmos ecosystem."},
-            {"name": "Akash Network", "desc": "Decentralized cloud for web3 deployment."},
-            {"name": "Regen Network", "desc": "Carbon credits and ecological monitoring platform."},
-            {"name": "Secret Network", "desc": "Privacy-first smart contracts."},
-            {"name": "Thorchain", "desc": "Cross-chain liquidity protocol."},
-        ],
-    }
+chain = st.selectbox("Choose blockchain", ["Ethereum", "XRP", "Cosmos"])
 
-    st.subheader("🔥 AI-Backed Project Picks")
-    for coin in suggestions[selected_chain]:
-        with st.expander(f"{coin['name']} - Learn More"):
-            st.markdown(f"**Overview**: {coin['desc']}")
-            st.markdown("**Community**: Strong presence and engagement on Twitter and Discord.")
-            st.markdown("**Whitepaper**: Transparent and visionary with clear utility.")
-            st.markdown("**Token Utility**: Used in governance, staking, or service access.")
+# Fetch altcoins for selected chain
+if CHAIN_CATEGORY.get(chain):
+    coins_data = fetch_altcoins(CHAIN_CATEGORY[chain])
+else:
+    # No category: fetch top 100 coins and filter by platform
+    coins_all = fetch_altcoins("all", per_page=100)  # 'all' category doesn't exist, fallback fetch top100
+    platform_slug = CHAIN_PLATFORM_SLUGS.get(chain)
+    if platform_slug:
+        coins_data = [c for c in coins_all if platform_slug in (c.get("platforms") or {})]
+    else:
+        coins_data = coins_all
 
-    st.subheader("🐦 Twitter Trending")
-    trends = get_twitter_trends(selected_chain)
-    for trend in trends:
-        st.markdown(f"- {trend}")
+if not coins_data:
+    st.error("Could not fetch coin data at the moment. Please try again later.")
+    st.stop()
 
-    keyword = st.text_input("Or search by keyword (e.g. DeFi, AI, gaming)")
-    st.caption("Made for personal research. Not financial advice.")
+# Get AI picks text
+ai_picks_text = get_ai_picks(chain, coins_data)
 
-# --- Sol Casino Page ---
-elif page == "Sol Casino":
-    st.markdown('<div class="section-header">Sol Casino - Solana Meme Coin Scanner 🎲</div>', unsafe_allow_html=True)
+if ai_picks_text:
+    st.subheader(f"🔥 AI Suggested Projects on {chain}")
+    # Parse AI output into individual picks (simple split by coin name and description)
+    # This is rough parsing based on expected format; may need tweaking
+    picks = ai_picks_text.split("\n\n")
+    current_coin = None
+    for block in picks:
+        lines = block.strip().split("\n")
+        if not lines:
+            continue
+        # Assuming first line is coin name (ends with colon)
+        if lines[0].endswith(":"):
+            coin_name = lines[0][:-1].strip()
+            details = "\n".join(lines[1:])
+            # Separate "Simpler terms" if present
+            simpler_start = details.lower().find("simpler terms:")
+            if simpler_start != -1:
+                detailed_text = details[:simpler_start].strip()
+                simpler_text = details[simpler_start + len("simpler terms:"):].strip()
+            else:
+                detailed_text = details
+                simpler_text = ""
+            with st.expander(f"{coin_name} - Learn More"):
+                st.markdown(detailed_text)
+                if simpler_text:
+                    st.markdown(f"<p class='simple-terms'>Simpler terms: {simpler_text}</p>", unsafe_allow_html=True)
+        else:
+            # Sometimes AI may output unexpected format; just show block
+            st.markdown(block)
+else:
+    st.warning("AI suggestions not available. Showing fallback picks.")
+    fallback = fallback_picks(coins_data)
+    for coin in fallback:
+        with st.expander(f"{coin['name']} ({coin['symbol'].upper()}) - Learn More"):
+            st.markdown(f"**Market Cap Rank:** {coin.get('market_cap_rank', 'N/A')}")
+            st.markdown(f"**Current Price:** ${coin.get('current_price', 'N/A')}")
+            st.markdown(f"**24h Volume:** ${coin.get('total_volume', 'N/A')}")
+            st.markdown(f"**More info:** [CoinGecko]({coin.get('links', {}).get('homepage', [''])[0]})")
 
-    token_address = st.text_input("Analyze token by address")
-    if token_address:
-        st.markdown(f"**Token Analysis for:** `{token_address}`")
-        with st.container():
-            st.markdown("- **Bubble Map**: [Placeholder] Shows cluster of large holders")
-            st.markdown("- **Freeze Authority**: Present")
-            st.markdown("- **Mint Authority**: Present")
-            st.markdown("- **Token Utility**: Governance + Staking")
-            st.markdown("- **Overall Risk Score**: 5/10")
+# Keyword search box and autocomplete (optional feature to implement separately)
+st.markdown("---")
+st.markdown("### Search for altcoins by name or keyword (Coming Soon)")
 
-    st.caption("Data powered by Solana + AI. No dummy tokens shown.")
+st.caption("Made for personal research. Not financial advice.")
+
 
