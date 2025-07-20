@@ -1,179 +1,126 @@
+# --- Imports ---
 import streamlit as st
 import requests
 import openai
-import time
+import random
 
-# Set OpenAI API key from Streamlit secrets
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+# --- Load API Key from Streamlit secrets ---
+openai.api_key = st.secrets["openai"]["api_key"]
 
+# --- Config ---
+st.set_page_config(page_title="Crypto AI Deal Finder", layout="wide")
+st.title("🧠📈 Crypto AI Deal Finder")
 
-# --- Page Setup ---
-st.set_page_config(page_title="Crypto AI Deal Finder", layout="wide", initial_sidebar_state="expanded")
+st.markdown("Choose a chain to get AI-powered altcoin picks that change every refresh. Suggestions use OpenAI and fallback to heuristics if needed.")
 
-# --- Custom CSS ---
-st.markdown("""
-<style>
-    body, .block-container {
-        background-color: #121212;
-        color: #e0e0e0;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    .section-header {
-        color: #ff6f61;
-        border-bottom: 2px solid #ff6f61;
-        padding-bottom: 6px;
-        margin-bottom: 12px;
-        font-weight: 700;
-        font-size: 1.4rem;
-        user-select: none;
-    }
-    .simple-terms {
-        font-style: italic;
-        color: #ccc;
-        margin-top: 10px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# --- Helper: fetch altcoins by chain from CoinGecko ---
-def fetch_altcoins(chain_id, per_page=100):
-    url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "category": chain_id,
-        "order": "market_cap_desc",
-        "per_page": per_page,
-        "page": 1,
-        "sparkline": "false"
-    }
+# --- Helper: Fetch coins by chain from CoinGecko ---
+def get_chain_altcoins(chain_id):
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:
+        url = "https://api.coingecko.com/api/v3/coins/list"
+        coins = requests.get(url).json()
+        chain_coins = []
+        for coin in coins:
+            coin_detail = requests.get(f"https://api.coingecko.com/api/v3/coins/{coin['id']}").json()
+            platforms = coin_detail.get("platforms", {})
+            if chain_id in platforms and coin_detail["market_cap_rank"] and coin_detail["market_cap_rank"] > 100:
+                chain_coins.append({
+                    "id": coin_detail["id"],
+                    "name": coin_detail["name"],
+                    "symbol": coin_detail["symbol"],
+                    "description": coin_detail["description"]["en"][:300] or "No description.",
+                    "market_cap": coin_detail["market_data"]["market_cap"]["usd"],
+                    "current_price": coin_detail["market_data"]["current_price"]["usd"]
+                })
+        return chain_coins
+    except Exception as e:
+        st.error(f"Error fetching coin data: {e}")
         return []
 
-# Mapping for chain to CoinGecko category ID or fallback to chain slug:
-CHAIN_CATEGORY = {
-    "Ethereum": "ethereum-ecosystem",
-    "XRP": None,       # No exact category, fallback to filtering by platform below
-    "Cosmos": None,    # Same as XRP
-}
-
-# Helper to filter coins by platform for chains without category
-CHAIN_PLATFORM_SLUGS = {
-    "XRP": "ripple",
-    "Cosmos": "cosmos",
-}
-
-# --- Helper: get good altcoin picks with OpenAI ---
-def get_ai_picks(chain, altcoins):
-    """
-    Send coin list names to OpenAI with a prompt asking to pick top 5 altcoins
-    with potential on that chain with detailed description + simpler terms.
-    """
-    coin_names = [coin["name"] for coin in altcoins]
-    coin_list_str = ", ".join(coin_names[:50])  # limit to 50 to reduce prompt length
-    
-    prompt = (
-        f"You are a crypto analyst. From the following list of coins on the {chain} blockchain:\n"
-        f"{coin_list_str}\n"
-        "Pick the top 5 lesser-known altcoins with massive potential. "
-        "For each pick, provide:\n"
-        "1. Coin name\n"
-        "2. A detailed 3-paragraph explanation about the project, technology, and potential\n"
-        "3. A 'Simpler terms' section with a short easy explanation.\n\n"
-        "Format the response as:\n"
-        "Coin Name:\nDetailed Explanation...\nSimpler terms: ...\n\nRepeat for all 5 picks."
-    )
+# --- AI Explanation ---
+def get_ai_summary(coin_name, coin_desc):
     try:
+        prompt = f"Explain why {coin_name} is a promising altcoin in simple terms using this description: {coin_desc}"
         response = openai.ChatCompletion.create(
             model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1200,
-            temperature=0.75,
+            messages=[{"role": "user", "content": prompt}]
         )
-        text = response.choices[0].message.content.strip()
-        return text
+        return response["choices"][0]["message"]["content"]
     except Exception as e:
+        return f"(Fallback summary) {coin_desc}"
+
+# --- Search tokens by keyword ---
+def keyword_search(keyword, chain_coins):
+    keyword = keyword.lower()
+    return [coin for coin in chain_coins if keyword in coin["name"].lower() or keyword in coin["description"].lower()]
+
+# --- Search token by name ---
+def token_name_search(name):
+    try:
+        result = requests.get(f"https://api.coingecko.com/api/v3/search?query={name}").json()
+        if result["coins"]:
+            coin_id = result["coins"][0]["id"]
+            detail = requests.get(f"https://api.coingecko.com/api/v3/coins/{coin_id}").json()
+            return {
+                "name": detail["name"],
+                "symbol": detail["symbol"],
+                "description": detail["description"]["en"][:300],
+                "market_cap": detail["market_data"]["market_cap"]["usd"],
+                "price": detail["market_data"]["current_price"]["usd"]
+            }
+    except:
         return None
 
-# --- Fallback: top 5 altcoins by volume ---
-def fallback_picks(altcoins):
-    # Sort by volume desc, exclude top 3 by market cap (assuming those are big coins)
-    filtered = sorted(altcoins, key=lambda x: x["total_volume"], reverse=True)
-    filtered = [c for c in filtered if c["market_cap_rank"] and c["market_cap_rank"] > 3]
-    picks = filtered[:5]
-    return picks
+# --- Main ---
+chains = {
+    "Ethereum": "ethereum",
+    "XRP": "ripple",
+    "Cosmos": "cosmos"
+}
 
-# --- Main UI ---
-st.title("🧠📈 Crypto AI Deal Finder")
-st.markdown("Search altcoins by blockchain. AI suggests 5 promising altcoins with detailed and simplified explanations.")
+selected_chain = st.selectbox("Choose blockchain", list(chains.keys()))
+chain_id = chains[selected_chain]
+chain_coins = get_chain_altcoins(chain_id)
 
-chain = st.selectbox("Choose blockchain", ["Ethereum", "XRP", "Cosmos"])
+# --- AI Picks ---
+st.subheader(f"🔍 Top 5 {selected_chain} AI Picks")
 
-# Fetch altcoins for selected chain
-if CHAIN_CATEGORY.get(chain):
-    coins_data = fetch_altcoins(CHAIN_CATEGORY[chain])
+if chain_coins:
+    picks = random.sample(chain_coins, min(5, len(chain_coins)))
+    for coin in picks:
+        st.markdown(f"### {coin['name']} ({coin['symbol'].upper()})")
+        st.markdown(f"- **Market Cap**: ${coin['market_cap']:,}")
+        st.markdown(f"- **Price**: ${coin['current_price']}")
+        st.markdown("**In simpler terms:**")
+        st.markdown(get_ai_summary(coin["name"], coin["description"]))
+        st.markdown("---")
 else:
-    # No category: fetch top 100 coins and filter by platform
-    coins_all = fetch_altcoins("all", per_page=100)  # 'all' category doesn't exist, fallback fetch top100
-    platform_slug = CHAIN_PLATFORM_SLUGS.get(chain)
-    if platform_slug:
-        coins_data = [c for c in coins_all if platform_slug in (c.get("platforms") or {})]
+    st.warning("Could not fetch coins for this chain.")
+
+# --- Keyword Dropdown ---
+st.subheader("🔎 Explore by Keyword")
+common_keywords = {
+    "Ethereum": ["AI", "Gaming", "DeFi"],
+    "XRP": ["Payments", "Staking", "Real World Assets"],
+    "Cosmos": ["IBC", "AMM", "Governance"]
+}
+
+kw = st.selectbox("Pick a keyword", common_keywords[selected_chain])
+filtered = keyword_search(kw, chain_coins)
+for c in filtered[:3]:
+    st.markdown(f"- {c['name']} ({c['symbol'].upper()})")
+
+# --- Search Token by Name ---
+st.subheader("🔍 Search for Token by Name")
+token_name = st.text_input("Type token name (e.g., Chainlink, Algorand)")
+if token_name:
+    result = token_name_search(token_name)
+    if result:
+        st.markdown(f"### {result['name']} ({result['symbol'].upper()})")
+        st.markdown(f"- **Market Cap**: ${result['market_cap']:,}")
+        st.markdown(f"- **Price**: ${result['price']}")
+        st.markdown("**In simpler terms:**")
+        st.markdown(get_ai_summary(result["name"], result["description"]))
     else:
-        coins_data = coins_all
-
-if not coins_data:
-    st.error("Could not fetch coin data at the moment. Please try again later.")
-    st.stop()
-
-# Get AI picks text
-ai_picks_text = get_ai_picks(chain, coins_data)
-
-if ai_picks_text:
-    st.subheader(f"🔥 AI Suggested Projects on {chain}")
-    # Parse AI output into individual picks (simple split by coin name and description)
-    # This is rough parsing based on expected format; may need tweaking
-    picks = ai_picks_text.split("\n\n")
-    current_coin = None
-    for block in picks:
-        lines = block.strip().split("\n")
-        if not lines:
-            continue
-        # Assuming first line is coin name (ends with colon)
-        if lines[0].endswith(":"):
-            coin_name = lines[0][:-1].strip()
-            details = "\n".join(lines[1:])
-            # Separate "Simpler terms" if present
-            simpler_start = details.lower().find("simpler terms:")
-            if simpler_start != -1:
-                detailed_text = details[:simpler_start].strip()
-                simpler_text = details[simpler_start + len("simpler terms:"):].strip()
-            else:
-                detailed_text = details
-                simpler_text = ""
-            with st.expander(f"{coin_name} - Learn More"):
-                st.markdown(detailed_text)
-                if simpler_text:
-                    st.markdown(f"<p class='simple-terms'>Simpler terms: {simpler_text}</p>", unsafe_allow_html=True)
-        else:
-            # Sometimes AI may output unexpected format; just show block
-            st.markdown(block)
-else:
-    st.warning("AI suggestions not available. Showing fallback picks.")
-    fallback = fallback_picks(coins_data)
-    for coin in fallback:
-        with st.expander(f"{coin['name']} ({coin['symbol'].upper()}) - Learn More"):
-            st.markdown(f"**Market Cap Rank:** {coin.get('market_cap_rank', 'N/A')}")
-            st.markdown(f"**Current Price:** ${coin.get('current_price', 'N/A')}")
-            st.markdown(f"**24h Volume:** ${coin.get('total_volume', 'N/A')}")
-            st.markdown(f"**More info:** [CoinGecko]({coin.get('links', {}).get('homepage', [''])[0]})")
-
-# Keyword search box and autocomplete (optional feature to implement separately)
-st.markdown("---")
-st.markdown("### Search for altcoins by name or keyword (Coming Soon)")
-
-st.caption("Made for personal research. Not financial advice.")
+        st.warning("Token not found.")
 
 
