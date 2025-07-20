@@ -3,9 +3,9 @@ import requests
 import openai
 import time
 
-# --- Config ---
-OPENAI_API_KEY = "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"
-openai.api_key = OPENAI_API_KEY
+# Set OpenAI API key from Streamlit secrets
+openai.api_key = st.secrets["OPENAI_API_KEY"]
+
 
 # --- Page Setup ---
 st.set_page_config(page_title="Crypto AI Deal Finder", layout="wide", initial_sidebar_state="expanded")
